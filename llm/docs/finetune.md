@@ -36,7 +36,7 @@
 ### 3.1 环境准备
 
 - PaddlePaddle 3.0-beta
-- PaddleNLP   3.0.0b2
+- PaddleNLP   3.0.0b3
 - PaddleSlim develop
 
 git clone 代码到本地，即可开始。
@@ -130,10 +130,14 @@ python merge_lora_params.py \
 - `neftune_noise_alpha`: NEFT alpha 参数，默认为5.0。
 - `vera`: 是否开启 VeRA 微调策略，默认为 False。
 - `vera_rank`: VeRA 算法中 rank（秩）的值，默认为8。
+- `lokr`: 是否开启 LoKr 微调策略，默认为 False。
+- `lokr_rank`: LoKr 算法中 rank（秩）的值，默认为8。
 - `use_long_sequence_strategies`: 是否使用长序列扩展策略，默认为 False。
 - `strategy_type`: 长序列扩展策略的类型，默认为 None。
 - `strategy_name`: 长序列扩展策略的具体名称，默认为 None。
 - `rope_scaling_factor`: 应用 RoPE 扩展策略时的缩放因子。
+- `lora_use_mixer`: 是否开启 MosLoRA 策略。
+
 </div>
 
 <summary>&emsp; 数据参数（DataArgument）</summary><div>
@@ -181,4 +185,19 @@ python merge_lora_params.py \
 - `pipeline_parallel_degree`: 表示划分流水线的大小.(假设该参数为4, 模型12层, 则每一个 pp stage 包含3层模型) 默认值-1, 表示不启用流水线并行。
 - `sharding_parallel_degree`: 表示分组参数切片的数据并行大小. 默认值1, 表示不启用分组参数切片的数据并行。
 - `sharding`:是否使用 Paddle 的 Sharding 数据并行功能，用户的参数。支持 sharding `stage1`, `stage2` or `stage3`。其中`stage2``stage3`可以和`offload`组合使用。
+- `optim`:默认为`adamw`，支持`adamw`, `adamw_mini`。
+</div>
+
+
+
+<summary>&emsp; 表征微调(ReFT)参数（ReftArgument） </summary><div>
+
+- `model_name_or_path`: 预训练模型名称或者本地的模型路径，用于热启模型和分词器，默认为 None。每个模型**支持模型权重**详见各模型目录。
+- `layers`: 干预模型的那些层，默认为 all, 干预所有层。
+- `position`: 干预哪些位置的 token，默认为 f7, 干预前7个 token。
+- `intervention_type`: 干预网络的类型，默认为 LoReftIntervention。
+- `rank`: 干预网络的低秩，默认为 8。
+- `act_fn`: 干预网络中的激活函数，默认为 linear。
+- `add_bias`: 干预网络中是否添加偏置，默认为 False。
+- `dropout`:  干预网络中的 Dropout rate，默认为 0.00。
 </div>
