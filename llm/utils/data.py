@@ -88,6 +88,8 @@ def tokenize_unsupervised_example(tokenizer, example, data_args, is_test=True, z
 
     if data_args.use_pose_convert:
         tokenized_source = get_example_pose(tokenized_source, tokenizer, data_args)
+    elif data_args.use_ssa_convert:
+        tokenized_source = get_example_pose_sparse(tokenized_source, tokenizer, data_args)
 
     return tokenized_source
 
@@ -418,4 +420,105 @@ def get_example_pose(tokenized_source, tokenizer, data_args):
 
     features = {"input_ids": chunked_ids, "labels": labels, "position_ids": pos_ids}
 
+    return features
+
+
+def get_postion_ids(starts_pos, block_lengths):
+    if len(starts_pos) != len(block_lengths):
+        raise ValueError(f"Lengths are not the same: {len(starts_pos)} != {len(block_lengths)}")
+    pos_ids = []
+    for start, length in zip(starts_pos, block_lengths):
+        pos_ids += list(range(start, start+length))
+    return pos_ids
+
+
+def get_sparsity_levels(starts_pos, block_lengths, len_input, beta=200, min_value=0.2):
+    if len(starts_pos) != len(block_lengths):
+        raise ValueError(f"Lengths are not the same: {len(starts_pos)} != {len(block_lengths)}")
+    sparsity_levels = []
+    func = lambda x : min_value + (1-min_value)*(1-np.log(1 + beta * x / len_input) / np.log(1 + beta))
+    for start, length in zip(starts_pos, block_lengths):
+        sparsity = round(func(start + length//2), 2)
+        sparsity_levels.append(sparsity)
+    return sparsity_levels
+
+
+def get_example_pose_sparse(tokenized_source, tokenizer, data_args):
+    
+    ids = tokenized_source["input_ids"]
+    len_chunk = min(len(ids), data_args.max_length)            # 重构后序列的长度
+    num_segments = data_args.num_segments
+
+    if len(tokenized_source["input_ids"]) <= data_args.max_length:
+        tokenized_source["input_ids"] += [tokenizer.eos_token_id]
+        
+
+    len_input = len(ids)
+    block_len = len_input // num_segments          # 块的平均长度
+    min_len = min(data_args.segment_min_length, len_chunk // num_segments)
+
+    if len_input < num_segments:
+        raise ValueError("The input sequence is too short to generate N non-overlapping subsequences.")
+
+    # sub_sequences = []
+    chunked_ids = []
+    labels = []
+    lengths = []     # 重构后序列中每个子序列的长度，用于在LLaMA中构建attention_mask
+    start_pos = []   # 每个子序列的初始位置在原序列中的下标索引
+    total_len = 0    # 已选择的子序列总长度
+    start_index = 0
+    end_index = 0
+    pre_index = 0    # 上一个字序列的末尾位置
+    for i in range(num_segments):
+        if i == 0:
+            end_index = random.randint(min_len, (len_chunk-total_len) // (num_segments-i))
+            subseq = ids[start_index:end_index]     # 提取子序列
+            # label = ids[start_index+1:end_index+1]     # 获取对应的label
+            label = ids[start_index:end_index]
+            
+            chunked_ids += subseq    # 添加到结果列表中
+            labels += label
+            lengths.append(end_index)
+            start_pos.append(start_index)
+            total_len += end_index      # 更新总长度
+            pre_index = end_index    # 更新位置下标
+            
+        elif i == num_segments-1:   #最后一个序列
+            end_index = random.randint(pre_index+(len_chunk-total_len), len_input-1)    # -1是为了空出最后一个<s>给label
+            # x = max(1, len_chunk-total_len-(len_input-end_index))
+            # y = end_index-pre_index
+            seq_len = len_chunk - total_len
+            start_index = end_index - seq_len
+            subseq = ids[start_index:end_index]     # 提取子序列
+            # label = ids[start_index+1:end_index+1]  
+            label = ids[start_index:end_index]
+
+            chunked_ids += subseq    # 添加到结果列表中
+            labels += label
+            lengths.append(seq_len)
+            start_pos.append(start_index)
+        else:
+            can_len = block_len * (i+1) - pre_index   # 候选长度
+            end_index = random.randint(pre_index + min_len, block_len*(i+1))    # 在当前块内随机确定子序列末尾位置,(修正了min_len)
+            x = max(min_len, len_chunk-total_len-(len_input-end_index-1))       # -1是为了空出最后一个<s>给label
+            y = min(end_index-pre_index, (len_chunk-total_len)//(num_segments-i))
+            y = y if y > x else x
+            seq_len = random.randint(x,y)
+            start_index = end_index - seq_len
+            subseq = ids[start_index:end_index]     # 提取子序列
+            # label = ids[start_index+1:end_index+1]     
+            label = ids[start_index:end_index]
+            
+            chunked_ids += subseq    # 添加到结果列表中
+            labels += label
+            lengths.append(seq_len)
+            start_pos.append(start_index)
+            total_len += seq_len
+            pre_index = end_index
+
+    pos_ids = get_postion_ids(start_pos, lengths)   
+    sparsity_levels = get_sparsity_levels(start_pos, lengths, len_input)
+
+    features = {"input_ids": chunked_ids, "labels": labels, "position_ids": pos_ids, "block_lengths": lengths, "sparsity_levels": sparsity_levels} 
+            
     return features

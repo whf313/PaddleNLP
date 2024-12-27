@@ -65,4 +65,8 @@ class DataConfig:
         metadata={"help": "Whether to use autoregressive mode."},
     )
     # Pose ralated parameters
-    use_pose_convert: bool = field(default=False, metadata={"help": "Whether to use PoSE data conversion function"})
+    use_pose_convert: bool = field(default=False, metadata={"help": "Whether to use PoSE data conversion function."})
+    # SSA ralated parameters
+    use_ssa_convert: bool = field(default=False, metadata={"help": "Whether to use Segmented Sparse Attention data conversion function."})
+    num_segments: int = field(default=4, metadata={"help": "Number of segments selected by the SSA algorithm."})
+    segment_min_length: int = field(default=512, metadata={"help": "Minimum value of segment length."})
