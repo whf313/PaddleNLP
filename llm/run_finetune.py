@@ -97,6 +97,9 @@ def main():
     else:
         gen_args, model_args, reft_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
+    training_args.do_eval = False
+    print(training_args)
+    print("*" * 10)
     training_args.print_config(model_args, "Model")
     training_args.print_config(data_args, "Data")
     training_args.print_config(gen_args, "Generation")

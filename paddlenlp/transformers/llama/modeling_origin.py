@@ -417,6 +417,73 @@ def repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
 import paddle
 import numpy as np
 
+def _prepare_example_mask(self, block_length, sparsity_levels, block_size, device, dtype):
+    num_blocks = len(block_length)
+    total_length = paddle.sum(block_length).item()  # Calculate total length by summing all subsequence lengths
+
+    attention_mask = paddle.full([total_length, total_length], paddle.finfo(dtype).min)
+    mask_cond = paddle.arange(attention_mask.shape[-1])
+    attention_mask.masked_fill_(mask_cond < (mask_cond + 1).view(attention_mask.size(-1), 1), 0)
+
+    start_indices = paddle.concat([paddle.to_tensor([0], dtype=dtype), paddle.cumsum(block_length[:-1], 0)])
+    
+    for i in range(num_blocks):
+        for j in range(i):
+            distance = abs(i - j)
+            if distance > len(sparsity_levels):
+                raise ValueError(
+                    f"Sparsity level index out of range: distance={distance}, "
+                    f"but sparsity_levels only has {len(sparsity_levels)} levels."
+                )
+
+            sparsity = sparsity_levels[distance - 1]
+            start_i, start_j = start_indices[i], start_indices[j]
+            length_i, length_j = block_length[i], block_length[j]
+
+            # Only apply the mask if start_i is greater than start_j to keep it lower triangular
+            attention_mask[start_i:start_i+length_i, start_j:start_j+length_j] = paddle.finfo(dtype).min  # Set block to -inf
+
+            # Get matrix size
+            rows, cols = int(length_i), int(length_j)
+
+            # Calculate the number of blocks
+            num_blocks_row = rows // block_size
+            num_blocks_col = cols // block_size
+
+            # Randomly select blocks
+            total_blocks = num_blocks_row * num_blocks_col
+            max_blocks_to_select = int(total_blocks * sparsity)
+
+            block_indices = np.arange(total_blocks)
+            selected_indices = paddle.to_tensor(np.random.choice(block_indices, size=max_blocks_to_select, replace=False), dtype=paddle.int32, device=device)
+
+            row_indices = start_i + (selected_indices // num_blocks_col) * block_size
+            col_indices = start_j + (selected_indices % num_blocks_col) * block_size
+
+            for row, col in zip(row_indices, col_indices):
+                attention_mask[row:row + block_size, col:col + block_size] = 0        
+
+    return attention_mask
+
+def _prepare_block_attention_mask(self, block_length, max_length, inputs_embeds, sparsity_levels, num_group=16, block_size=50):
+        dtype = inputs_embeds.dtype
+        device = inputs_embeds.device
+        num_seq = len(block_length)
+        group_dim = self.num_heads // num_group
+
+        attention_mask =  paddle.full([num_seq, self.num_heads, max_length, max_length], paddle.finfo(dtype).min)
+
+        for index, (lengths, sparsity_level) in enumerate(zip(block_length, sparsity_levels)):
+            total_length = lengths.sum()
+            if num_group != 1:
+                for i_group in range(num_group):
+                    example_mask = self._prepare_example_mask(lengths, sparsity_level, block_size, device, dtype)
+                    attention_mask[index, i_group*group_dim: (i_group+1)*group_dim, 0:total_length, 0:total_length] = example_mask
+            else:
+                example_mask = self._prepare_example_mask(lengths, sparsity_level, block_size, device, dtype)
+                attention_mask[index, :, 0:total_length, 0:total_length] = example_mask
+
+        return attention_mask
 
 class LlamaRotaryEmbedding(nn.Layer):
     def __init__(self, dim, max_position_embeddings=2048, base=10000):
@@ -1596,93 +1663,20 @@ class LlamaModel(LlamaPretrainedModel):
         if get_env_device() in ["npu", "mlu", "intel_hpu"]:
             x = paddle.to_tensor(0.0, dtype="float32")
             y = paddle.to_tensor(paddle.finfo(dtype).min, dtype="float32")
-            expanded_attn_mask = paddle.where(expanded_attn_mask, x, y).astype(dtype)
-        elif get_env_device() in ["xpu", "gcu"]:
-            min_val = paddle.finfo(dtype).min if get_env_device() == "gcu" else -1e37  # mask value for xpu
+            expanded_attn_mask = paddle.where(expanded_attn_mask.cast("bool"), x, y).astype(dtype)
+        elif get_env_device() == "xpu":
+            x = paddle.to_tensor(0.0, dtype="float32")
+            y = paddle.to_tensor(-1.7005809656952787e38, dtype="float32")
+            expanded_attn_mask = paddle.where(expanded_attn_mask.cast("bool"), x, y)
+        elif get_env_device() == "gcu":
+            min_val = paddle.finfo(dtype).min
             x = paddle.to_tensor(0.0, dtype=dtype)
             y = paddle.to_tensor(min_val, dtype=dtype)
-            expanded_attn_mask = expanded_attn_mask.astype(dtype)
-            expanded_attn_mask = paddle.where(expanded_attn_mask, x, y).astype(dtype)
+            expanded_attn_mask = paddle.where(expanded_attn_mask.cast("bool"), x, y).astype(dtype)
         else:
             expanded_attn_mask = paddle.where(expanded_attn_mask.cast("bool"), 0.0, paddle.finfo(dtype).min)
             expanded_attn_mask = expanded_attn_mask.astype(dtype)
         return expanded_attn_mask
-
-    def _prepare_example_mask(self, block_length, sparsity_levels, block_size, dtype):
-        num_blocks = len(block_length)
-        total_length = block_length.sum()  # Calculate total length by summing all subsequence lengths
-        print(f"total:{total_length}")
-
-        if isinstance(total_length, paddle.Tensor):
-            total_length = total_length.item()
-        
-        attention_mask = paddle.full((total_length, total_length), paddle.finfo(dtype).min)
-        mask_cond = paddle.arange(attention_mask.shape[-1])
-        attention_mask.masked_fill_(mask_cond < (mask_cond + 1).view([attention_mask.shape[-1], 1]), 0)
-        
-        start_indices = paddle.concat([paddle.to_tensor([0]), block_length[:-1].cumsum(0)])
-            
-        for i in range(num_blocks):
-            for j in range(i):
-                distance = abs(i - j)
-                if distance > len(sparsity_levels):
-                    raise ValueError(
-                        f"Sparsity level index out of range: distance={distance}, "
-                        f"but sparsity_levels only has {len(sparsity_levels)} levels."
-                    )
-                
-                sparsity = sparsity_levels[distance - 1]
-                start_i, start_j = start_indices[i], start_indices[j]
-                length_i, length_j = block_length[i], block_length[j]
-
-                # Only apply the mask if start_i is greater than start_j to keep it lower triangular
-                attention_mask[start_i:start_i+length_i, start_j:start_j+length_j] = paddle.finfo(dtype).min       # 先将该block设置为min
-
-                # 获取矩阵的大小
-                rows, cols = int(length_i), int(length_j)
-
-                # 计算块的数量
-                num_blocks_row = rows // block_size
-                num_blocks_col = cols // block_size
-
-                # 随机选择块
-                total_blocks = num_blocks_row * num_blocks_col
-                max_blocks_to_select = int(total_blocks * sparsity)
-
-                block_indices = np.arange(total_blocks)
-                selected_indices = paddle.to_tensor(np.random.choice(block_indices, size=max_blocks_to_select, replace=False))
-                if selected_indices.numel() == 0:
-                    break
-                row_indices = start_i + (selected_indices // num_blocks_col) * block_size
-                col_indices = start_j + (selected_indices % num_blocks_col) * block_size
-
-                for row, col in zip(row_indices, col_indices):
-                    attention_mask[row:row + block_size, col:col + block_size] = 0        
-            
-        return attention_mask
-
-
-    def _prepare_block_attention_mask(self, block_length, max_length, inputs_embeds, sparsity_levels, num_group=1, block_size=64):
-        dtype = inputs_embeds.dtype
-        # device = inputs_embeds.device
-        num_seq = len(block_length)
-        group_dim = self.config.num_attention_heads // num_group
-        num_mask = self.config.num_attention_heads if num_group != 1 else 1
-
-        attention_mask =  paddle.full((num_seq, num_mask, max_length, max_length), paddle.finfo(dtype).min)
-
-        for index, (lengths, sparsity_level) in enumerate(zip(block_length, sparsity_levels)):
-            total_length = lengths.sum()
-            if num_group != 1:
-                for i_group in range(num_group):
-                    example_mask = self._prepare_example_mask(lengths, sparsity_level, block_size, dtype)
-                    attention_mask[index, i_group*group_dim: (i_group+1)*group_dim, 0:total_length, 0:total_length] = example_mask
-            else:
-                example_mask = self._prepare_example_mask(lengths, sparsity_level, block_size, dtype)
-                attention_mask[index, :, 0:total_length, 0:total_length] = example_mask
-
-        return attention_mask
-
 
     @paddle.jit.not_to_static
     def recompute_training_full(
@@ -1725,8 +1719,6 @@ class LlamaModel(LlamaPretrainedModel):
         attention_mask=None,
         inputs_embeds=None,
         use_cache=None,
-        block_lengths=None,
-        sparsity_levels=None,
         past_key_values=None,
         output_attentions=False,
         output_hidden_states=None,
@@ -1816,11 +1808,8 @@ class LlamaModel(LlamaPretrainedModel):
         if self.config.use_flash_attention_for_generation or use_casual_mask:
             attention_mask = None
         elif attn_mask_startend_row_indices is None:
-            # attention_mask = self._prepare_decoder_attention_mask(
-            #     attention_mask, (batch_size, seq_length), cache_length, inputs_embeds.dtype
-            # )  # [bs, 1, seq_len, seq_len]
-            attention_mask = self._prepare_block_attention_mask(
-                block_lengths, self.config.seq_length, inputs_embeds, sparsity_levels
+            attention_mask = self._prepare_decoder_attention_mask(
+                attention_mask, (batch_size, seq_length), cache_length, inputs_embeds.dtype
             )  # [bs, 1, seq_len, seq_len]
 
         is_casual = False
@@ -2159,8 +2148,6 @@ class LlamaForCausalLM(LlamaPretrainedModel):
         attention_mask=None,
         inputs_embeds=None,
         labels=None,
-        block_lengths=None,
-        sparsity_levels=None,
         use_cache=False,
         past_key_values=None,
         output_attentions=None,
@@ -2180,15 +2167,13 @@ class LlamaForCausalLM(LlamaPretrainedModel):
                 "The attn_mask_startend_row_indices will be used."
             )
             attention_mask = None
-        print(f"haha:{block_lengths}, {sparsity_levels}")
+
         outputs = self.llama(
             input_ids,  # [bs, seq_len]
             position_ids=position_ids,
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            block_lengths=block_lengths,                    
-            sparsity_levels=sparsity_levels,
             past_key_values=past_key_values,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,

@@ -72,8 +72,8 @@ class DataFormatError(ValueError):
 
 
 def tokenize_unsupervised_example(tokenizer, example, data_args, is_test=True, zero_padding=False, flash_mask=False):
-    if "src" in example:
-        source = example["src"][0] if isinstance(example["src"], list) else example["src"]
+    if "text" in example:
+        source = example["text"][0] if isinstance(example["text"], list) else example["text"]
     else:
         raise DataFormatError(
             f"Example format is wrong, please check: {example} or rewrite tokenize_example in data.py "
@@ -89,7 +89,7 @@ def tokenize_unsupervised_example(tokenizer, example, data_args, is_test=True, z
     if data_args.use_pose_convert:
         tokenized_source = get_example_pose(tokenized_source, tokenizer, data_args)
     elif data_args.use_ssa_convert:
-        tokenized_source = get_example_pose_sparse(tokenized_source, tokenizer, data_args)
+        tokenized_source = get_example_ssa(tokenized_source, tokenizer, data_args)
 
     return tokenized_source
 
@@ -216,6 +216,9 @@ def convert_example_common(example, tokenizer, data_args, is_test=True, zero_pad
         features = {"input_ids": input_ids, "labels": labels}
         if "position_ids" in tokenized_source:
             features["position_ids"] = tokenized_source["position_ids"]
+        if data_args.use_ssa_convert:
+            features["block_lengths"] = tokenized_source["block_lengths"]
+            features["sparsity_levels"] = tokenized_source["sparsity_levels"]
     else:
         if tokenizer.chat_template is not None:
             return convert_rounds_example_common(example, tokenizer, data_args, is_test, zero_padding, flash_mask)
@@ -443,7 +446,7 @@ def get_sparsity_levels(starts_pos, block_lengths, len_input, beta=200, min_valu
     return sparsity_levels
 
 
-def get_example_pose_sparse(tokenized_source, tokenizer, data_args):
+def get_example_ssa(tokenized_source, tokenizer, data_args):
     
     ids = tokenized_source["input_ids"]
     len_chunk = min(len(ids), data_args.max_length)            # 重构后序列的长度
@@ -519,6 +522,7 @@ def get_example_pose_sparse(tokenized_source, tokenizer, data_args):
     pos_ids = get_postion_ids(start_pos, lengths)   
     sparsity_levels = get_sparsity_levels(start_pos, lengths, len_input)
 
+    print("return !!! block_")
     features = {"input_ids": chunked_ids, "labels": labels, "position_ids": pos_ids, "block_lengths": lengths, "sparsity_levels": sparsity_levels} 
             
     return features
